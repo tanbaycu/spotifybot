@@ -5,10 +5,7 @@ import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 import logging
 import json
-from datetime import datetime, timedelta
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+from datetime import datetime
 
 # Thiết lập logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -18,10 +15,6 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 SPOTIFY_REDIRECT_URI = "https://tanbaycu.vercel.app/spotify_auth"
-EMAIL_HOST = "smtp.gmail.com"
-EMAIL_PORT = 587
-EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER")
-EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD")
 
 SPOTIFY_SCOPE = "user-read-currently-playing user-top-read user-read-recently-played playlist-read-private user-library-read user-read-email user-read-private user-follow-read"
 
@@ -44,9 +37,6 @@ COMMANDS = {
     "settings": "⚙️ Cài đặt"
 }
 
-# Thêm hằng số cho thời gian hết hạn token
-TOKEN_EXPIRATION_TIME = 3600  # 1 giờ, điều chỉnh theo thực tế của Spotify API
-
 def get_main_keyboard():
     keyboard = [[KeyboardButton(text)] for text in COMMANDS.values()]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -56,26 +46,9 @@ def init_user_data(user_id: str) -> None:
     if user_id not in user_data:
         user_data[user_id] = {
             'token': None,
-            'refresh_token': None,
             'amount': DEFAULT_AMOUNT,
-            'last_command': None,
-            'token_expiration': None
+            'last_command': None
         }
-
-async def refresh_token(user_id: str) -> bool:
-    try:
-        token_info = sp_oauth.refresh_access_token(user_data[user_id]['refresh_token'])
-        user_data[user_id]['token'] = token_info['access_token']
-        user_data[user_id]['refresh_token'] = token_info['refresh_token']
-        
-        # Cập nhật thời gian hết hạn
-        expires_in = token_info.get('expires_in', TOKEN_EXPIRATION_TIME)
-        user_data[user_id]['token_expiration'] = datetime.now() + timedelta(seconds=expires_in)
-        
-        return True
-    except Exception as e:
-        logger.error(f"Error refreshing token: {e}")
-        return False
 
 def get_user_amount(user_id: str) -> int:
     """Lấy số lượng kết quả đã cài đặt của người dùng"""
@@ -91,24 +64,6 @@ def escape_markdown(text: str) -> str:
     for char in special_chars:
         text = text.replace(char, f'\\{char}')
     return text
-
-async def send_email_notification(to_email: str, subject: str, message: str) -> bool:
-    """Gửi thông báo qua email"""
-    try:
-        msg = MIMEMultipart()
-        msg['From'] = EMAIL_HOST_USER
-        msg['To'] = to_email
-        msg['Subject'] = subject
-        msg.attach(MIMEText(message, 'plain', 'utf-8'))
-        
-        with smtplib.SMTP(EMAIL_HOST, EMAIL_PORT) as server:
-            server.starttls()
-            server.login(EMAIL_HOST_USER, EMAIL_HOST_PASSWORD)
-            server.send_message(msg)
-        return True
-    except Exception as e:
-        logger.error(f"Lỗi gửi email: {e}")
-        return False
 
 async def get_current_track(update: Update, sp: spotipy.Spotify) -> None:
     """Lấy thông tin bài hát đang phát."""
@@ -410,161 +365,6 @@ async def get_recent_activity(update: Update, sp: spotipy.Spotify) -> None:
             parse_mode='Markdown'
         )
 
-async def check_token_expiration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    user_id = str(update.effective_user.id)
-    init_user_data(user_id)
-    
-    if not user_data[user_id].get('token') or not user_data[user_id].get('token_expiration'):
-        return False
-
-    current_time = datetime.now()
-    expiration_time = user_data[user_id]['token_expiration']
-
-    try:
-        # Lấy thông tin người dùng để có email
-        sp = spotipy.Spotify(auth=user_data[user_id]['token'])
-        user_info = sp.current_user()
-        user_email = user_info.get('email')
-        user_name = user_info.get('display_name', 'Người dùng')
-
-        # Kiểm tra token đã hết hạn
-        if current_time >= expiration_time:
-            if await refresh_token(user_id):
-                await send_token_refresh_notification(update, context)
-                
-                # Gửi email thông báo token đã được làm mới
-                if user_email:
-                    email_subject = "Spotify Bot - Phiên đăng nhập đã được làm mới"
-                    email_message = f"""
-Xin chào {user_name},
-
-Phiên đăng nhập Spotify của bạn đã được tự động làm mới thành công.
-Bạn có thể tiếp tục sử dụng bot mà không cần thực hiện thêm thao tác nào.
-
-Nếu bạn không thực hiện hành động này, vui lòng đăng xuất ngay bằng lệnh /logout và đăng nhập lại.
-
-Trân trọng,
-Spotify Bot
-"""
-                    await send_email_notification(user_email, email_subject, email_message)
-                return True
-            else:
-                await send_login_notification(update, context)
-                
-                # Gửi email thông báo token hết hạn
-                if user_email:
-                    email_subject = "Spotify Bot - Phiên đăng nhập đã hết hạn"
-                    email_message = f"""
-Xin chào {user_name},
-
-Phiên đăng nhập Spotify của bạn đã hết hạn và không thể tự động làm mới.
-Vui lòng thực hiện đăng nhập lại bằng cách:
-
-1. Sử dụng lệnh /start trong bot
-2. Nhấn vào nút "Xác thực Spotify"
-3. Đăng nhập vào tài khoản Spotify của bạn
-4. Sao chép token nhận được
-5. Quay lại bot và sử dụng lệnh /set_token để nhập token mới
-
-Nếu bạn cần hỗ trợ thêm, vui lòng sử dụng lệnh /help.
-
-Trân trọng,
-Spotify Bot
-"""
-                    await send_email_notification(user_email, email_subject, email_message)
-                return False
-        
-        # Kiểm tra token sắp hết hạn (còn 5 phút)
-        if expiration_time - current_time <= timedelta(minutes=5):
-            await send_token_expiring_soon_notification(update, context)
-            
-            # Gửi email cảnh báo token sắp hết hạn
-            if user_email and not user_data[user_id].get('notification_sent'):
-                time_left = int((expiration_time - current_time).total_seconds() / 60)
-                email_subject = "Spotify Bot - Phiên đăng nhập sắp hết hạn"
-                email_message = f"""
-Xin chào {user_name},
-
-Phiên đăng nhập Spotify của bạn sẽ hết hạn trong {time_left} phút nữa.
-Bot sẽ tự động làm mới phiên đăng nhập của bạn khi cần thiết.
-
-Nếu bạn gặp bất kỳ vấn đề gì trong việc sử dụng bot, vui lòng:
-1. Sử dụng lệnh /logout để đăng xuất
-2. Sau đó sử dụng lệnh /start để đăng nhập lại
-
-Trân trọng,
-Spotify Bot
-"""
-                await send_email_notification(user_email, email_subject, email_message)
-                user_data[user_id]['notification_sent'] = True
-        
-        return True
-        
-    except Exception as e:
-        logger.error(f"Lỗi kiểm tra token: {e}")
-        return False
-
-
-async def send_token_refresh_notification(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = (
-        "🔄 *Thông báo: Phiên đăng nhập đã được tự động làm mới!*\n\n"
-        "Bạn có thể tiếp tục sử dụng bot bình thường.\n"
-        "Một email xác nhận đã được gửi đến địa chỉ email của bạn."
-    )
-    await update.message.reply_text(message, parse_mode='Markdown')
-
-async def send_token_expiring_soon_notification(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = str(update.effective_user.id)
-    expiration_time = user_data[user_id]['token_expiration']
-    time_left = expiration_time - datetime.now()
-    minutes_left = int(time_left.total_seconds() / 60)
-    
-    message = (
-        f"⏳ *Thông báo: Phiên đăng nhập sắp hết hạn!*\n\n"
-        f"Phiên của bạn sẽ hết hạn trong khoảng {minutes_left} phút nữa.\n"
-        "Bot sẽ tự động làm mới phiên đăng nhập khi cần thiết.\n"
-        "Một email thông báo đã được gửi đến địa chỉ email của bạn."
-    )
-    
-    await update.message.reply_text(message, parse_mode='Markdown')
-
-# Thêm hàm gửi thông báo đăng nhập lại
-async def send_login_notification(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = str(update.effective_user.id)
-    auth_url = sp_oauth.get_authorize_url(state=user_id)
-    keyboard = [[InlineKeyboardButton("🔑 Xác thực lại Spotify", url=auth_url)]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    message = (
-        "⚠️ *Phiên đăng nhập của bạn đã hết hạn!*\n\n"
-        "Để tiếp tục sử dụng bot, bạn cần xác thực lại với Spotify. "
-        "Vui lòng làm theo các bước sau:\n\n"
-        "1. Nhấn nút 'Xác thực lại Spotify' bên dưới\n"
-        "2. Đăng nhập vào tài khoản Spotify của bạn\n"
-        "3. Sao chép token nhận được\n"
-        "4. Quay lại đây và sử dụng lệnh /set\\_token để nhập token mới\n\n"
-        "Nếu bạn gặp bất kỳ vấn đề nào, hãy sử dụng lệnh /help để được hỗ trợ."
-    )
-    
-    await update.message.reply_text(message, reply_markup=reply_markup, parse_mode='Markdown')
-
-# Thêm hàm gửi thông báo token sắp hết hạn
-async def send_token_expiring_soon_notification(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = str(update.effective_user.id)
-    expiration_time = user_data[user_id]['token_expiration']
-    time_left = expiration_time - datetime.now()
-    minutes_left = int(time_left.total_seconds() / 60)
-    
-    message = (
-        f"⏳ *Thông báo: Phiên đăng nhập của bạn sắp hết hạn!*\n\n"
-        f"Phiên của bạn sẽ hết hạn trong khoảng {minutes_left} phút nữa. "
-        "Bot sẽ tự động làm mới token khi cần thiết. "
-        "Nếu bạn gặp bất kỳ vấn đề nào trong việc sử dụng bot, "
-        "vui lòng sử dụng lệnh /start để đăng nhập lại."
-    )
-    
-    await update.message.reply_text(message, parse_mode='Markdown')
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = str(update.effective_user.id)
     message_text = update.message.text
@@ -577,14 +377,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    # Kiểm tra token trước khi xử lý tin nhắn
-    if not await check_token_expiration(update, context):
-        return
-
     sp = spotipy.Spotify(auth=user_data[user_id]['token'])
 
     try:
-        # Xử lý các lệnh như trước
         if message_text == COMMANDS["current"]:
             await get_current_track(update, sp)
         elif message_text == COMMANDS["top"]:
@@ -610,13 +405,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except spotipy.SpotifyException as e:
         logger.error(f"Spotify error: {e}")
         if 'The access token expired' in str(e):
-            if await refresh_token(user_id):
-                await update.message.reply_text(
-                    "*🔄 Phiên đăng nhập đã được làm mới. Vui lòng thử lại lệnh của bạn.*",
-                    parse_mode='Markdown'
-                )
-            else:
-                await send_login_notification(update, context)
+            await update.message.reply_text(
+                "*⚠️ Phiên đăng nhập đã hết hạn. Vui lòng sử dụng /start để xác thực lại.*",
+                parse_mode='Markdown'
+            )
         else:
             await update.message.reply_text(
                 "*❌ Có lỗi xảy ra khi truy cập Spotify. Vui lòng thử lại sau.*",
@@ -635,11 +427,6 @@ async def set_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = str(update.effective_user.id)
         init_user_data(user_id)
         user_data[user_id]['token'] = token_info['access_token']
-        user_data[user_id]['refresh_token'] = token_info['refresh_token']
-        
-        # Lưu thời gian hết hạn
-        expires_in = token_info.get('expires_in', TOKEN_EXPIRATION_TIME)
-        user_data[user_id]['token_expiration'] = datetime.now() + timedelta(seconds=expires_in)
         
         # Xóa tin nhắn chứa token để bảo mật
         await update.message.delete()
@@ -836,4 +623,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
